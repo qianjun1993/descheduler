@@ -23,6 +23,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	apiserveroptions "k8s.io/apiserver/pkg/server/options"
 	clientset "k8s.io/client-go/kubernetes"
+	corelister "k8s.io/client-go/listers/core/v1"
 	"k8s.io/component-base/logs"
 
 	"sigs.k8s.io/descheduler/pkg/apis/componentconfig"
@@ -41,6 +42,7 @@ type DeschedulerServer struct {
 	Client         clientset.Interface
 	Logs           *logs.Options
 	SecureServing  *apiserveroptions.SecureServingOptionsWithLoopback
+	PodLister      corelister.PodLister
 	DisableMetrics bool
 }
 

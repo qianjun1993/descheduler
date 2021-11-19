@@ -19,11 +19,15 @@ package pod
 import (
 	"context"
 	"sort"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	clientset "k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/descheduler/pkg/utils"
 )
 
@@ -76,6 +80,96 @@ func ListPodsOnANode(
 	fieldSelectorString := "spec.nodeName=" + node.Name + ",status.phase!=" + string(v1.PodSucceeded) + ",status.phase!=" + string(v1.PodFailed)
 
 	return ListPodsOnANodeWithFieldSelector(ctx, client, node, fieldSelectorString, opts...)
+}
+
+//ListPodsOnANode2 list pods on a node
+func ListPodsOnANode2(ctx context.Context, lister corelisters.PodLister, node *v1.Node, opts ...func(opts *Options)) ([]*v1.Pod, error) {
+	options := &Options{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	pods := make([]*v1.Pod, 0)
+
+	labelSelector := labels.Everything()
+	if options.labelSelector != nil {
+		selector, err := metav1.LabelSelectorAsSelector(options.labelSelector)
+		if err != nil {
+			return []*v1.Pod{}, err
+		}
+		labelSelector = selector
+	}
+
+	if len(options.includedNamespaces) > 0 {
+
+		for _, namespace := range options.includedNamespaces {
+			podList, err := lister.Pods(namespace).List(labelSelector)
+			if err != nil {
+				return []*v1.Pod{}, err
+			}
+
+			for i := range podList {
+				if podList[i].Spec.NodeName != node.Name {
+					continue
+				}
+				if options.filter != nil && !options.filter(podList[i]) {
+					continue
+				}
+				pods = append(pods, podList[i])
+			}
+		}
+		return pods, nil
+	}
+
+	/*if len(options.excludedNamespaces) > 0 {
+		for _, namespace := range options.excludedNamespaces {
+			fieldSelectorString += ",metadata.namespace!=" + namespace
+		}
+	}*/
+
+	podList, err := lister.List(labelSelector)
+	if err != nil {
+		return []*v1.Pod{}, err
+	}
+
+	for i := range podList {
+		// fake client does not support field selectors
+		// so let's filter based on the node name as well (quite cheap)
+		if podList[i].Spec.NodeName != node.Name {
+			continue
+		}
+		if len(options.excludedNamespaces) > 0 {
+			for _, namespace := range options.excludedNamespaces {
+				if podList[i].Namespace == namespace {
+					continue
+				}
+			}
+		}
+		if options.filter != nil && !options.filter(podList[i]) {
+			continue
+		}
+		pods = append(pods, podList[i])
+	}
+	return pods, nil
+}
+
+//GetPodLister podlister
+func GetPodLister(client clientset.Interface, stopChannel <-chan struct{}) corelisters.PodLister {
+	if stopChannel == nil {
+		return nil
+	}
+	fieldSelector, _ := fields.ParseSelector(",status.phase!=" +
+		string(v1.PodSucceeded) + ",status.phase!=" + string(v1.PodFailed))
+	listWatcher := cache.NewListWatchFromClient(client.CoreV1().RESTClient(), "pods", v1.NamespaceAll, fieldSelector)
+	store := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	podLister := corelisters.NewPodLister(store)
+	reflector := cache.NewReflector(listWatcher, &v1.Pod{}, store, time.Hour)
+	go reflector.Run(stopChannel)
+
+	// To give some time so that listing works, chosen randomly
+	time.Sleep(100 * time.Millisecond)
+
+	return podLister
 }
 
 // ListPodsOnANodeWithFieldSelector lists all of the pods on a node using the filter selectors
